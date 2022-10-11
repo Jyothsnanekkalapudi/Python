@@ -1,0 +1,95 @@
+# Property validation functions
+from dateutil import parser
+from functools import lru_cache
+from datetime import datetime
+import logging
+
+logger = logging.getLogger()
+
+#String datatype validation
+@lru_cache
+def is_string(value,row_no):
+    return True
+
+#Interger datatype validation
+@lru_cache
+def is_int(value,row_no):
+    try:
+        if(value.strip()) == "":
+            return True
+        _ = float(value.strip())
+        #if not tmp.is_integer():
+        #    return False
+    except Exception as err:
+        #if debug:
+        #    print(
+        #        f"Error: Got error {err} when trying to parse value {value}.")
+        logger.debug(f"Error: For row number {row_no},Got error {err} when trying to parse value {value}.")
+        return False
+    return True
+
+#Float datatype validation
+@lru_cache
+def is_float(value,row_no):
+    try:
+        if(value.strip()) == "":
+            return True
+        _ = float(value.strip())
+    except Exception as err:
+        #if debug:
+        #    print(
+        #        f"Error: Got error {err} when trying to parse value {value}.")
+        logger.debug(f"Error: For row number {row_no},Got error {err} when trying to parse value {value}.")
+        return False
+    return True
+
+#Date datatype validation
+@lru_cache
+def is_datetime(value,row_no):
+    try:
+        if(value.strip()) == "":
+            return True
+        _ = parser.parse(value.strip(), fuzzy = True)
+        return True
+    except Exception as err:
+        pass
+    try:
+        datetime.strptime(value,"%m/%y")
+        return True
+    except Exception as err:
+        pass
+    try:
+        datetime.strptime(value,"%Y-%m-%d-%H.%M.%S.%f")
+    except Exception as err:
+        #if debug:
+        #    print(
+        #        f"Error: Got error {err} when trying to parse value {value}.")
+        logger.debug(f"Error: For row number {row_no},Got error {err} when trying to parse value {value}.")
+        return False
+    return True
+
+
+#datetime_test_cases = {
+#    "20220205": True,
+#    "14/01/1999": True,
+#    "14/14/22222": False,
+#    "2022-05-15 10:10:10": True,
+#    "2022-05-15 10:10:10.123423": True,
+#    "2022-05-15 10:10": True,
+#    "Mar 29 2021 12:00:00:000AM": True,
+#    "2021-10-11-14:45:36.001000" : True,
+#    "2021-10-11-14.45.36.001000" : True
+#    "3/00" : True
+#}
+
+
+#for test, result in datetime_test_cases.items():
+#    if is_datetime(test, debug=False) == result:
+#        print("Successful")
+#    else:
+#        print(f"Failed test {test}")
+
+#print(is_int("00000311827",1))
+#print(is_float(""))
+#print(is_string(""))
+#print(is_datetime("3/00",1))
