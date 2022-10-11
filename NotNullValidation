@@ -1,0 +1,190 @@
+#NotNull
+
+import argparse
+import concurrent.futures
+import csv
+from datetime import datetime
+import logging
+import multiprocessing
+import os
+import sys
+from functools import partial
+
+from validatorNotNull import validate
+
+date = datetime.now().strftime("%Y%m%d-%H:%M:%S")
+
+#Calculating the no. of processes
+PROCESS_COUNT = 1 #multiprocessing.cpu_count() - 1
+csv.field_size_limit(sys.maxsize)
+
+#Function to parse the arguments passed in the command line
+def parse_args() -> dict:
+
+    parser = argparse.ArgumentParser(description="Data file datatype_val.")
+
+    parser.add_argument("--data-file", dest="data_file", action="store",
+                        help="Namepath to file that has to be validated.", required=True)
+    parser.add_argument("--config-file", dest="config_file", action="store",
+                        help="Namepath to config to be used to validate file.", required=True)
+
+    parser.add_argument("--headers", dest="headers", action="store_true")
+    parser.add_argument("--no-headers", dest="headers", action="store_false")
+    parser.set_defaults(headers=False)
+
+    parser.add_argument("--debug", dest="debug", action="store_true")
+    parser.set_defaults(debug=False)
+
+    parser.add_argument("--delimiter", dest="delimiter", action="store")
+    parser.set_defaults(delimiter="|")
+
+    arg_dict = parser.parse_args()
+
+    return arg_dict
+
+#Function to parse config file
+def read_and_parse_config(config_filename: str):
+
+    # reading config file
+    try:
+        with open(config_filename, "r") as cfg:
+            config_str = cfg.read().strip()
+
+    except FileNotFoundError:
+        print(f"Error: Can't find config at path {config_filename}.")
+        raise
+
+    # parsing config file
+    config_rows = config_str.split("\n")
+    config_dict = {}
+
+    for row in config_rows:
+
+        # reading rows in config
+        name, value = row.split(":")
+        config_dict[name.strip()] = value.strip()
+
+    # checking if mandatory keys are present in config
+    assert "Columns" in config_dict, "Error: Missing \"Columns\" in config_dict"
+    assert "NotNull" in config_dict, "Error: Missing \"NotNull\" in config_dict"
+
+    return config_dict
+
+#Function to divide the input file into smaller files
+def divide_file(file_name, headers: bool = False, chunksize=5_00_000):
+
+    header_row, chunk_filenames = None, []
+    outfileno, outfile = 1, None
+
+    # read original file
+    with open(file_name, 'rb') as infile:
+
+        if headers:
+            header_row = infile.readline()
+
+        # iterate through every line
+        for index, row in enumerate(infile):
+
+            # after every chunksize rows
+            if index % chunksize == 0:
+
+                # handle starting empty chunk case
+                if outfile is not None:
+                    # close current file
+                    outfile.close()
+
+                # generate next name file
+                outfilename = f"{file_name}-Intermediate-{outfileno:04d}"
+                chunk_filenames.append(outfilename)
+
+                # open new file for writing further rows
+                outfile = open(outfilename, 'wb')
+                outfileno += 1
+
+            # write to currently open file
+            outfile.write(row)
+
+    return chunk_filenames, header_row
+
+#Function to merge the output files
+def merge_files(file_namepaths, final_name, header_row=None):
+
+    # open final output file
+    with open(final_name, 'wb') as outfile:
+
+        if header_row:
+            outfile.write(header_row)
+
+        # iterating through individual chunks
+        for fname in file_namepaths:
+
+            # write all rows from chunk in final output file
+            with open(fname, "rb") as infile:
+                for line in infile:
+                    outfile.write(line)
+
+#Function to remove the intermediate files
+def delete_files(file_list):
+    for fname in file_list:
+        os.remove(fname)
+
+
+def main(params):
+    """Entrypoint function."""
+
+    # reading and parsing config
+    config_dict = read_and_parse_config(config_filename=params.config_file)
+
+    # preprocessing
+    column_names = [item.strip()
+                    for item in config_dict["Columns"].split('|')]
+    not_null_columns = [item.strip()
+                        for item in config_dict["NotNull"].split('|')]
+
+    assert len(column_names) == len(not_null_columns), f"Error: Unequal number of Columns and NotNulls"
+
+    logger.info("Dividing the input files into smaller files")
+    print("Dividing the input files into smaller files")
+    individual_files, header_row = divide_file(params.data_file,params.headers)
+
+    #Partial functions allow us to fix a certain number of arguments of a function and generate a new function.
+    validation_func = partial(validate, not_null_columns=not_null_columns, delimiter=params.delimiter, headers=False)
+
+    accepted_files, rejected_files = [], []
+
+    with concurrent.futures.ProcessPoolExecutor(PROCESS_COUNT) as executor:
+
+        for accepted_file, rejected_file in executor.map(validation_func, individual_files):
+            accepted_files.append(accepted_file)
+            rejected_files.append(rejected_file)
+
+    logger.info("Merging the output files")
+    print("Merging the output files")
+    merge_files(accepted_files,
+                f"{params.data_file}_ACCEPTED", header_row=None,)
+    merge_files(rejected_files,
+                f"{params.data_file}_REJECTED", header_row=header_row,)
+
+    logger.info("Deleting intermediate files")
+    print("Deleting intermediate files")
+    delete_files(accepted_files+rejected_files+individual_files)
+
+
+if __name__ == "__main__":
+    # reading command line params
+    params = parse_args()
+
+    #logging mechanism
+    logging.basicConfig(filename=f"{params.data_file}.log",filemode = 'w', level=logging.INFO)
+    logger = logging.getLogger()
+    #logger.addHandler(logging.StreamHandler())
+    if params.debug:
+        logger.setLevel(logging.DEBUG)
+
+    try:
+        main(params)
+    except Exception as e:
+        os.system("rm *Intermediate*")
+        logger.error(e)
+        print("Validation failed.")
+        raise
