@@ -1,0 +1,126 @@
+#NotNull
+
+#import csv
+from functools import lru_cache
+import sys
+import logging
+
+from tqdm import tqdm
+
+#csv.field_size_limit(sys.maxsize)
+
+logger = logging.getLogger()
+
+def rowProcessor(newRow:str, delimiter:str, debug:bool = True):
+    #Traversing through the data file
+            line = newRow
+            #what are these counters???
+            i=0 #Counter for character in line?
+            j=0 #fieldBEginCounter???
+                #Needed to get the start of a field, when i
+                #goes through it
+            row=[]
+            lineLen=len(line)
+            #List of each character in the line
+            chrList=list(line)
+            #What are these variables???
+            beginQuote=0 #flag for if quote char is detected
+            delimPos=0 #???
+            #Traversing through each line
+            while i < lineLen:
+                chr=chrList[i]
+                if chr == '"':
+                    if beginQuote == 0: #If no quote char was detected,
+                                        #then this is the beg. quote.
+                        beginQuote=1
+                    else: #There has been a beg quote, so will just reset
+                        beginQuote=0
+                elif chr == delimiter:
+                    #|"abc"|
+                    if beginQuote == 0: #There's no open-ended quotes, so can just
+                                        #consider the field as complete.
+                        completeField = line[j:i]
+                        row.append(completeField)
+                        j=i+1
+                    else:
+                        #Delim was detected but quote has not been complete
+                        # "abc|af...
+                        #field is not complete, so will continue
+                        if delimPos == 0:
+                            delimPos=i
+                #can now move on to next character, and do some
+                #pre-processing
+                i=i+1
+                if i == lineLen:
+                    if beginQuote == 1:
+                        beginQuote=0
+                        i=delimPos
+                        delimPos=0
+                    else:
+                        row.append(line[j:i-1])
+
+            #if debug:
+            #    for r in row:
+            #        print(r, end=" ")
+            return row
+
+
+
+def validate(filename: str, not_null_columns: list,
+             delimiter: str, headers: bool = False):
+
+    # reading csv file
+    header_row = None
+    accepted_rows, rejected_rows = [], []
+
+
+    with open(filename, "rb") as input_file:
+
+        # ignoring header row
+        if headers:
+            header_row = input_file.readline()
+
+        # validate line by line
+        for row_no, line in enumerate(tqdm(input_file)):
+
+            # parsing
+            decoded_line = line.decode("latin-1")
+            row = rowProcessor(decoded_line, delimiter)
+
+            # not null validation
+            for field, col in zip(row, not_null_columns):
+                # not null validation
+                if col == "True":
+                    if field == '' or field is None:
+                        logger.debug(f"Row number {row_no} is rejected because of null value: {field}")
+                        rejected_rows.append(line)
+                        break
+
+            else:
+                accepted_rows.append(line)
+                continue
+
+
+        # writing accepted file
+        with open(f"{filename}_ACCEPTED", 'wb') as fp:
+
+            # writing the fields
+            #if header_row:
+            #    fp.write(header_row)
+
+            # writing the data rows
+            for row in accepted_rows:
+                fp.write(row)
+
+        # writing rejected file
+        with open(f"{filename}_REJECTED", 'wb') as fp:
+
+            # writing the fields
+            if header_row:
+                fp.write(header_row)
+
+            # writing the data rows
+            for row in rejected_rows:
+                fp.write(row)
+
+    return f"{filename}_ACCEPTED", f"{filename}_REJECTED"
