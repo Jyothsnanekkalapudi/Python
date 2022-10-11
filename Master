@@ -1,0 +1,1042 @@
+#!/bin/bash
+
+# parameter passing for source file , Config file, .out file and GRAH,GRAR load
+
+filename=$1
+skipheader=$2
+division=$3
+source_feed=$4
+MASTER_ID=$5
+GROUP_MASTER_ID=$6
+config=$7
+controlfilesource=$8
+#RELOAD=$9
+
+CURR_DATETIMESTAMP=`date "+%Y-%m-%d-%H-%M-%S"`
+export CURR_DATETIMESTAMP
+FILE_SUFFIX=${CURR_DATETIMESTAMP}
+export FILE_SUFFIX
+
+logname=`basename $0 .sh`
+scriptname=$0
+v_date=`date "+%Y%m%d%H%M%S"`
+LOG_FILE=${GRA_LOG}/master_script_${source_feed}_${FILE_SUFFIX}.log
+
+echo "Running ${scriptname} for ${source_feed} and file ${filename} started at ${v_date}">> $LOG_FILE
+echo "**************************************************************************">> $LOG_FILE
+#mkdir -p $GRA_INPUT/${source_feed}/InputFiles/Config_Files
+mkdir -p $GRA_INPUT/${source_feed}/InputFiles/Rejected_Files
+
+
+raw_path=$GRA_INPUT/$source_feed/InputFiles
+valiadted_path=$GRA_INPUT/$source_feed/OutputFiles
+config_path=$GRA_CONFIG/
+reject_path=$GRA_INPUT/${source_feed}/InputFiles/Rejected_Files
+reject=$filename'_REJECTED'
+validated=$filename'_ACCEPTED'
+log_file=$filename'.log'
+filenameraw=$filename'.raw'
+
+ETL_LOAD_ID=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select ETL_LOAD_ID1 as ETL_LOAD_ID from (SELECT max(BB.ETL_LOAD_ID) as ETL_LOAD_ID1 FROM GRA_PROC_CTRL.TETL_BATCH_BRIDGE BB,GRA_PROC_CTRL.TETL_CONS_CALENDAR_LKU CL WHERE CL.LAST_UPDT_TMS =(SELECT MAX (LAST_UPDT_TMS) FROM GRA_PROC_CTRL.TETL_CONS_CALENDAR_LKU) AND CL.CONS_CALENDAR_ID = BB.CONS_CALENDAR_ID)GROUP by ETL_LOAD_ID1"`
+
+#divison Y to be specified non 300 files , N to be specified for 300 files
+if [[ "$division" == "Y" ]]; then
+    echo "Starting Non 300 Preprocessing for ${source_feed} and file ${filename} ">> $LOG_FILE
+    if [[ "$filename" == *"CRS"* ]]; then
+      if [[ -f "$raw_path/$filename" && -f "$raw_path/$controlfilesource" && -f  "$config_path/$config" ]]; then
+        echo "All Required Files exist at correct path">> $LOG_FILE
+      else
+        echo "All Required Files Doesnot exist at correct path .. exiting"
+        echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+        exit 1
+      fi
+
+      CTRL_TMP_COUNT=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $5}'`
+      CTRL_FILE_COUNT=`echo $CTRL_TMP_COUNT | sed 's/0*//'`
+      OTABLE_NAME=`echo $filename | cut -d'_' -f 6-12 | cut -d '.' -f1`
+      uw_file_type=`echo CRS-$OTABLE_NAME`
+      uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}'`
+      uw_run_date=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $3}'`
+      uw_file_name="$filename"
+      UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+      ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+      load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+      load_status="Validated with the control file but not loaded yet"
+      uw_eff_date="19000101"
+
+      cp $raw_path/$filename $raw_path/$filenameraw
+
+      if [[ "$filename" == *"TPOLICY_AMT_DTL_COMP"* ]]; then
+
+        sed -i 's/\x02/\x01/g' $raw_path/$filename
+        #sed -i 's/\x02/|/g' $raw_path/$filename
+        #sed -i 's/\x01/|/g' $raw_path/$filename
+        sed -i "s/\r//g" $raw_path/$filename
+
+        if [[  $skipheader  == "Y" ]]; then
+         echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+         sed -i 1d $raw_path/$filename
+        fi
+
+        DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+        if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+          echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+          python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config --delimiter ''
+          if [[ $? -ne 0 ]]; then
+           echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+           echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+           exit 1
+          fi
+           echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+        else
+           echo "DAT and CTRL File Counts are not Matching"
+           echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+           exit 1
+        fi
+
+        line=`(< "$raw_path/$filename" wc -l)`
+
+        linesv=`(< "$raw_path/$validated" wc -l)`
+
+        linesr=`(< "$raw_path/$reject" wc -l)`
+
+        mv $raw_path/$validated $raw_path/$filename
+
+        gzip $raw_path/$filename
+
+        mv $raw_path/$filename'.gz' $valiadted_path
+
+        mv $raw_path/$filenameraw $raw_path/$filename
+
+        gzip $raw_path/$filename
+
+        mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+        mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+      fi
+
+      if [[ "$filename" == *"TPOLICY_AMT_DTL_EXP_DT"* ]]; then
+
+        #sed -i 's/\x01/|/g' $raw_path/$filename
+
+        sed -i 's/\xc7/\n/g' $raw_path/$filename
+
+        sed -i "s/\r//g" $raw_path/$filename
+
+        #sed -i 's/[[:cntrl:]]//g' $raw_path/$filename
+
+        python3 gra_crs_preprocessing.py $raw_path/$filename $raw_path/$filename'_prod'
+        if [[ $? -ne 0 ]]; then
+          echo "Python gra_crs_preprocessing.py failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python gra_crs_preprocessing.py failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+        fi
+
+        mv $raw_path/$filename'_prod' $raw_path/$filename
+
+        if [[  $skipheader  == "Y" ]]; then
+          echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+          sed -i 1d $raw_path/$filename
+        fi
+
+        DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+        if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+          echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+          python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config --delimiter ''
+          if [[ $? -ne 0 ]]; then
+            echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+            echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+            exit 1
+          fi
+          echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+        else
+          echo "DAT and CTRL File Counts are not Matching"
+          echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+        fi
+
+        line=`(< "$raw_path/$filename" wc -l)`
+
+        linesv=`(< "$raw_path/$validated" wc -l)`
+
+        linesr=`(< "$raw_path/$reject" wc -l)`
+
+        mv $raw_path/$validated $raw_path/$filename
+
+        gzip $raw_path/$filename
+
+        mv  $raw_path/$filename'.gz' $valiadted_path
+
+        mv $raw_path/$filenameraw $raw_path/$filename
+
+        gzip $raw_path/$filename
+
+        mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+        mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+      fi
+
+      if [[ "$filename" == *"MACHINE_LOSS"* ]]; then
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       sed -i "s/\r//g" $raw_path/$filename
+
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+         if [[ $? -ne 0 ]]; then
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+         fi
+         echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+      fi
+
+      if [[ "$filename" == *"TPOLICY_AMT_DTL_INS_DTL"* ]]; then
+
+       #sed -i 's/\x01/|/g' $raw_path/$filename
+       sed -i 's/\xc7/\n/g' $raw_path/$filename
+
+       sed -i "s/\r//g" $raw_path/$filename
+       #sed -i 's/[[:cntrl:]]//g' $raw_path/$filename
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config --delimiter ''
+         if [[ $? -ne 0 ]]; then
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+        fi
+        echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+        echo "DAT and CTRL File Counts are not Matching"
+        echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+        exit 1
+       fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+      fi
+
+      if [[ "$filename" == *"TEDW_REINS_PREMIUM_DETAIL"* ]]; then
+
+       #sed -i 's/\x02/|/g' $raw_path/$filename
+       sed -i "s/\r//g" $raw_path/$filename
+       sed -i "s/\"/\'\"\'/g" $raw_path/$filename
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         #echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         #python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+         #if [[ $? -ne 0 ]]; then
+         #  echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+         #  echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         #  exit 1
+         #fi
+         echo "Preprocessing completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$filename" wc -l)`
+
+       linesr=0
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       #mv $raw_path/$validated $raw_path/$filename
+
+       #gzip $raw_path/$filename
+
+       #mv $raw_path/$filename'.gz' $valiadted_path
+
+       #mv $raw_path/$filenameraw $raw_path/$filename
+
+       #gzip $raw_path/$filename
+
+       #mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       #mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+      fi
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+    elif [[ "$source_feed" == *"AIV"* ]]; then
+       if [[ -f "$raw_path/$filename" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       cd $raw_path
+
+       ls *.xml* > aivfilecount.txt
+
+       for file in `cat aivfilecount.txt`
+       do
+       python3 $GRA_BIN/xmltocsv.py $raw_path/$file
+       if [[ $? -ne 0 ]]; then
+         echo "Python xmltocsv.py failed for ${source_feed} and file ${filename} .. exiting"
+         echo "Python xmltocsv.py failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+       done
+
+       python3 $GRA_BIN/mergercsv.py
+       if [[ $? -ne 0 ]]; then
+         echo "Python mergercsv.py failed for ${source_feed} and file ${filename} .. exiting"
+         echo "Python mergercsv.py failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       line=`(< "$valiadted_path/AERO_Report_Final.csv" wc -l)`
+
+       linesv=`(< "$valiadted_path/AERO_Report_Final.csv" wc -l)`
+
+       linesr=0
+
+       gzip $valiadted_path/AERO_Report_Final.csv
+
+       cp $valiadted_path/AERO_Report_Final.csv.gz $raw_path
+
+       for file in `cat aivfilecount.txt`
+       do
+        rm -rf $raw_path/$file
+       done
+
+       rm -rf aivfilecount.txt
+       echo "Preprocessing Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       cd $GRA_BIN
+
+    elif [[ "$source_feed" == *"ERE"* ]]; then
+       if [[ -f "$raw_path/$filename" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+       if [[ "$filename" == *"Ultimate_Risk_Bearer"* ]];then
+         OTABLE_NAME="TULTIMATE_RISK_BEARER"
+       elif [[ "$filename" == *"Platform_Activity"* ]];then
+         OTABLE_NAME="TPLATFORM_ACTIVITY"
+       fi
+
+       uw_file_type=`echo ERE-$OTABLE_NAME`
+       uw_seq_no="1"
+       uw_run_date=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Loaded the File Successfully"
+       uw_eff_date="19000101"
+
+       python3 XLSXtoCSV.py $raw_path/$filename
+       if [[ $? -ne 0 ]]; then
+         echo "Python XLSXtoCSV.py failed for ${source_feed} and file ${filename} .. exiting"
+         echo "Python XLSXtoCSV.py failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+
+       validated=`echo ${filename/xlsx/csv}`
+
+       line=`(< "$raw_path/$validated" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=0
+
+       rm -rf $raw_path/$filename
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$validated
+       fi
+
+       gzip $raw_path/$validated
+
+       cp $raw_path/$validated.'gz' $valiadted_path
+
+       echo "Preprocessing Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+   elif [[ "$source_feed" == *"EDS"* ]]; then
+
+       if [[ -f "$raw_path/$filename" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+
+
+       python3 XLSXtoCSV.py $raw_path/$filename
+       if [[ $? -ne 0 ]]; then
+         echo "Python XLSXtoCSV.py failed for ${source_feed} and file ${filename} .. exiting"
+         echo "Python XLSXtoCSV.py failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       validated=`echo ${filename/xlsx/csv}`
+
+       if [[ "$source_feed" == *"EDS"* && "$filename" == *"Monthly_Europe_Cyber"* ]]; then
+       sed -i 's/_x000D_//g' $raw_path/$validated
+       fi
+
+       line=`(< "$raw_path/$validated" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=0
+
+       rm -rf $raw_path/$filename
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$validated
+       fi
+
+       gzip $raw_path/$validated
+
+       cp $raw_path/$validated.'gz' $valiadted_path
+
+       echo "Preprocessing Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+
+    elif [[ "$source_feed" == *"TRY"* ]]; then
+       if [[ -f "$raw_path/$filename" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       export filename=FXRATES.TXT
+       cat $raw_path/*FXRATES.TXT > $raw_path/FXRATES_final.TXT
+       ls $raw_path/*FXRATES*.TXT | grep -v final | while read line; do rm $line; done;
+       mv $raw_path/FXRATES_final.TXT $raw_path/$filename
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$filename" wc -l)`
+
+       linesr=0
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       echo "Preprocessing Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+    elif [[ "$source_feed" == *"CVL"* ]]; then
+
+       if [[ -f "$raw_path/$filename" && -f "$raw_path/$controlfilesource" && -f  "$config_path/$config" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       CTRL_TMP_COUNT=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $5}'`
+       CTRL_FILE_COUNT=`echo $CTRL_TMP_COUNT | sed 's/0*//'`
+        if [[ -z $CTRL_FILE_COUNT ]]; then
+       CTRL_FILE_COUNT=0
+       fi
+       OTABLE_NAME=`echo $filename | cut -d'_' -f 6-12 | cut -d '.' -f1`
+       uw_file_type=`echo CVL-$OTABLE_NAME`
+       uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}' | cut -c 3`
+       uw_run_date=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $3}'`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Validated with the control file but not loaded yet"
+       uw_eff_date="19000101"
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       #sed -i 's/\x09/  /g' $raw_path/$filename
+       sed -i "s/\r//g" $raw_path/$filename
+
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+         if [[ $? -ne 0 ]]; then
+           echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+           echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+           exit 1
+         fi
+         echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+    elif [[ "$source_feed" == *"ADB"* ]]; then
+       if [[ -f "$raw_path/$filename" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       OTABLE_NAME=`echo $filename | cut -d '.' -f1`
+       uw_file_type=`echo ADB-T$OTABLE_NAME`
+       uw_seq_no="1"
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       uw_run_date=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       load_status="Validated with the control file but not loaded yet"
+       uw_eff_date="19000101"
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$filename" wc -l)`
+
+       linesr=0
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       echo "Preprocessing Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+    elif [[ "$source_feed" == *"CRD"* ]]; then
+       if [[ -f "$raw_path/$filename" && -f "$raw_path/$controlfilesource" && -f  "$config_path/$config" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       CTRL_TMP_COUNT=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $5}'`
+       CTRL_FILE_COUNT=`echo $CTRL_TMP_COUNT | sed 's/0*//'`
+       uw_file_type="CRD"
+       uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}'`
+       uw_run_date=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $3}'`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Validated with the control file but not loaded yet"
+       uw_eff_date="19000101"
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       sed -i "s/\r//g" $raw_path/$filename
+
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+         if [[ $? -ne 0 ]]; then
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+         fi
+         echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       cat $raw_path/$validated | perl -p -e 's/\"\|\"/###/g' | perl -p -e 's/"/#&#/g' | perl -p -e 's/^#&#/"/g' | perl -p -e 's/#&#$/"/g' | perl -p -e 's/###/\"\|\"/g' | perl -p -e 's/"//g' > $raw_path/$validated'_tmp'
+       mv $raw_path/$validated'_tmp' $raw_path/$validated
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+    else
+
+       if [[ -f "$raw_path/$filename" && -f "$raw_path/$controlfilesource" && -f  "$config_path/$config" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       OTABLE_NAME=`echo $filename | cut -d'_' -f 6-12 | cut -d '.' -f1`
+       if [[ "$source_feed" == *"EDW"* ]]; then
+         uw_file_type=`echo REF-$OTABLE_NAME`
+       elif [[ "$source_feed" == *"ETR"* ]]; then
+         uw_file_type=`echo ETR-$OTABLE_NAME`
+       elif [[ "$source_feed" == *"COM"* ]]; then
+         uw_file_type=`echo REF-$OTABLE_NAME`
+       fi
+
+       CTRL_TMP_COUNT=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $5}'`
+       CTRL_FILE_COUNT=`echo $CTRL_TMP_COUNT | sed 's/0*//'`
+       uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}'`
+       uw_run_date=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $3}'`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Validated with the control file but not loaded yet"
+       uw_eff_date="19000101"
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[ "$source_feed" == *"EDW"* && "$filename" == *"TSHELL_LOC"* ]]; then
+       sed -i "s/\"/\'\"\'/g" $raw_path/$filename
+       fi
+
+        if [[ "$source_feed" == *"ETR"* && "$filename" == *"TREATY"* ]]; then
+       sed -i "s/\"/\'\"\'/g" $raw_path/$filename
+       fi
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       #sed -i 's/|//g' $raw_path/$filename
+       #sed -i 's/\x09/  /g' $raw_path/$filename
+       #sed -i 's/[[:cntrl:]]//g' $raw_path/$filename
+       #sed -i 's/\x01/|/g' $raw_path/$filename
+       sed -i ":a;/\r$/{$!N;s/\r\n//;t a};s/\r/ /g" $raw_path/$filename
+       sed -i "s/\r//g" $raw_path/$filename
+
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python Non 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3 NotNullValidation.py --data-file $raw_path/$filename --config-file $config_path/$config --delimiter ''
+         if [[ $? -ne 0 ]]; then
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+         fi
+         echo "Preprocessing and Python Non 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       if [[ "$source_feed" == *"EDW"* && "$filename" == *"TSHELL_LOC"* ]]; then
+       grep \'\"\' $raw_path/$reject >> $raw_path/$validated
+       grep -v \'\"\' $raw_path/$reject > $raw_path/$reject"_valid"
+       mv $raw_path/$reject"_valid" $raw_path/$reject
+       fi
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+      fi
+else
+     echo "Starting 300 Preprocessing for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+     if [[ $source_feed != "SCI" ]]; then
+       if [[ -f "$raw_path/$filename" && -f "$raw_path/$controlfilesource" && -f  "$config_path/$config" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+
+
+       #sed -i 's/\x09/  /g' $raw_path/$filename
+       #sed -i 's/[[:cntrl:]]//g' $raw_path/$filename
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       sed -i "s/\r//g" $raw_path/$filename
+
+
+       CTRL_TMP_COUNT=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $5}'`
+       CTRL_FILE_COUNT=`echo $CTRL_TMP_COUNT | sed 's/0*//'`
+       uw_file_type=`echo $filename |  cut -d '_' -f1`
+       if [[ "$source_feed" == *"GLT"* || "$source_feed" == *"TPR"* || "$source_feed" == *"AWS"* || "$source_feed" == *"AIQ"*  || "$source_feed" == *"MGA"* || "$source_feed" == *"UPS"* || "$source_feed" == *"ESP"* || "$source_feed" == *"EXS"* || "$source_feed" == *"DC1"* || "$source_feed" == *"DMS"* ]]; then
+         uw_seq_no="1"
+       elif [[ "$source_feed" == *"PPS"* ]];then
+         uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}' | cut -c 3`
+       else
+         uw_seq_no=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $4}'`
+       fi
+
+       uw_run_date=`cat $raw_path/$controlfilesource | awk  -F "|" '{print $3}'`
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Validated with the control file"
+       if [[ "$filename" == *"LIM_REF_ESP_AsOf"* ]]; then
+         uw_eff_date=`echo $filename |  cut -d '_' -f5`
+       else
+         uw_eff_date=`echo $filename |  cut -d '_' -f4`
+       fi
+
+       DAT_FILE_COUNT=`(< "$raw_path/$filename" wc -l)`
+       if [[ "$DAT_FILE_COUNT" == "$CTRL_FILE_COUNT" ]]; then
+         echo "Starting Python 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+         python3  ColAndDtypeValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+         if [[ $? -ne 0 ]]; then
+          echo "Python 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+          echo "Python 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+          exit 1
+         fi
+         echo "Preprocessing and Python 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+       else
+         echo "DAT and CTRL File Counts are not Matching"
+         echo "DAT and CTRL File Counts are not Matching for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       if [[ "$source_feed" == *"UPS"* || "$source_feed" == *"GLT"* || "$source_feed" == *"TPR"* || "$source_feed" == *"AIQ"* || "$source_feed" == *"PPS"* ]]; then
+        sed -i "s/\"/\'\"/g" $raw_path/$validated
+        fi
+
+        if [[ "$source_feed" == *"PPS"* && "$filename" == *"POL"* ]]; then
+        cat $raw_path/$validated | tr -d '\000' > $raw_path/$validated'_tmp'
+        mv $raw_path/$validated'_tmp' $raw_path/$validated
+        fi
+
+       if [[ "$source_feed" == *"AIQ"* && "$filename" == *"CV1"* ]]; then
+       sed -i "s/NULL/NULL1/g" $raw_path/$validated
+       fi
+
+       if [[ "$source_feed" == *"AWS"* ]]; then
+        cat $raw_path/$validated | perl -p -e 's/\|\"/###/g' | perl -p -e 's/\"\|/#&#/g' | perl -p -e 's/"//g' | perl -p -e 's/###/\|\"/g' | perl -p        -e 's/#&#/\"\|/g' > $raw_path/$validated'_tmp'
+        mv $raw_path/$validated'_tmp' $raw_path/$validated
+        fi
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),to_date('$uw_run_date','yyyymmdd'),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+
+     else
+
+       if [[ -f "$raw_path/$filename" && -f  "$config_path/$config" ]]; then
+         echo "All Required Files exist at correct path">> $LOG_FILE
+       else
+         echo "All Required Files Doesnot exist at correct path .. exiting"
+         echo "All Required Files Doesnot exist at correct path .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       cp $raw_path/$filename $raw_path/$filenameraw
+
+       if [[  $skipheader  == "Y" ]]; then
+        echo "Skipping Header for ${source_feed} and file ${filename}">> $LOG_FILE
+        sed -i 1d $raw_path/$filename
+       fi
+
+       #sed -i 's/\x09/  /g' $raw_path/$filename
+       #sed -i 's/[[:cntrl:]]//g' $raw_path/$filename
+       #iconv -f utf-8 -t utf-8 -c $raw_path/$filename -o $raw_path/$filename'_prod'
+       #mv $raw_path/$filename'_prod' $raw_path/$filename
+
+       if [[ $filename == *ANDD.IGLBSCIP.TPOL.RULE.TXT* ]]; then
+        cat $raw_path/$filename | perl -p -e 's/\r\n/#&#/g' | perl -p -e 's/\n//g' | perl -p -e 's/#&#/\r\n/g' > $raw_path/$filename'_tmp'
+        mv $raw_path/$filename'_tmp' $raw_path/$filename
+        fi
+
+       if [[ $filename != *"ANDDLMSP.POL"* ]]; then
+       sed -i "s/\r//g" $raw_path/$filename
+       fi
+
+        if [[ $filename == *"ANDDLMSP.POL"* ]]; then
+        cat $raw_path/$filename | perl -p -e 's/\r\n/Ã§/g' | perl -p -e 's/\n//g' | perl -p -e 's/Ã§/\r\n/g' > $raw_path/$filename'_tmp'
+        cat $raw_path/$filename'_tmp' | tr -d '\000' | tr -d '\014' > $raw_path/$filename'_tmp1'
+        mv $raw_path/$filename'_tmp1' $raw_path/$filename
+        rm -f $raw_path/$filename'_tmp'
+        fi
+
+       if [[ $filename == *"TPOL.RULE.OCCR"* ]]; then
+         cat $raw_path/$filename | perl -p -e 's/\0\n//g' > $raw_path/$filename'_tmp'
+         mv $raw_path/$filename'_tmp' $raw_path/$filename
+
+        fi
+
+       tmp_file_type=`echo $filename | cut -d'.' -f 3-7`
+       uw_file_type=`echo ${tmp_file_type/.TXT/}`
+       uw_seq_no="1"
+       uw_file_name="$filename"
+       UW_IDENT=`snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "select UW_IDENT from GRA_REF_DATA.TUW_REF where UW='$source_feed';"`
+       ETL_ID=`echo ${ETL_LOAD_ID}| cut -c 1-8`
+       load_id=`echo $ETL_ID$UW_IDENT"0"$uw_seq_no`
+       load_status="Validated with the control file"
+       uw_eff_date="19000101"
+
+       echo "Starting Python 300 Validation for ${source_feed} and file ${filename} ">> $LOG_FILE
+       python3 ColAndDtypeValidation.py --data-file $raw_path/$filename --config-file $config_path/$config
+       if [[ $? -ne 0 ]]; then
+         echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting"
+         echo "Python Non 300 Validation failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+         exit 1
+       fi
+
+       echo "Preprocessing and Python 300 Validation completed for ${source_feed} and file ${filename} ">> $LOG_FILE
+
+       line=`(< "$raw_path/$filename" wc -l)`
+
+       linesv=`(< "$raw_path/$validated" wc -l)`
+
+       linesr=`(< "$raw_path/$reject" wc -l)`
+
+       mv $raw_path/$validated $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$filename'.gz' $valiadted_path
+
+       mv $raw_path/$filenameraw $raw_path/$filename
+
+       gzip $raw_path/$filename
+
+       mv $raw_path/$reject $reject_path/$reject"_"$v_date
+
+       mv $raw_path/$log_file $GRA_LOG/$log_file"_"$v_date
+
+
+       snowsql -a ${GRA_SNW_URL} -u ${GRA_SNW_USR} --private-key-path ${GRA_PRIVATE_KEY_PATH} -o friendly=false -o header=false -o timing=false -o output_format=plain -d $GRA_DB_NAME -w $GRA_WAREHOUSE_NAME -r $GRA_DB_ROLE -q "insert into GRA_PROC_CTRL.TUW_BATCH(UW,UW_FILE_TYPE,LOAD_ID,LOAD_DATE,UW_SEQ_NO,UW_EFF_DATE,UW_RUN_DATE,RECORD_COUNT,UW_FILE_NAME,PREPROCESS_COUNT,LOAD_STATUS,REJ_REC_COUNT,ETL_LOAD_ID,ETL_LOAD_DT,ETL_LOADED_BY) values ('$source_feed','$uw_file_type',$load_id,CURRENT_DATE(),$uw_seq_no,to_date('$uw_eff_date','yyyymmdd'),CURRENT_DATE(),$linesv,'$filename',$line,'$load_status',$linesr,$ETL_LOAD_ID,CURRENT_DATE(),'$ETL_LOADED_BY');"
+     fi
+fi
+
+echo "Executing snowflake_data_load.sh for ${source_feed} and file ${filename} ">> $LOG_FILE
+bash snowflake_data_load.sh $MASTER_ID $GROUP_MASTER_ID
+if [[ $? -ne 0 ]]; then
+  echo "snowflake_data_load.sh failed for ${source_feed} and file ${filename} .. exiting">> $LOG_FILE
+else
+  echo "snowflake_data_load.sh successful for ${source_feed} and file ${filename}">> $LOG_FILE
+fi
+
+echo "**************************************************************************">> $LOG_FILE
+echo "End of execution for ${source_feed} and file ${filename}">> $LOG_FILE
+
